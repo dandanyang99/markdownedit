@@ -88,46 +88,112 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 插入文本
   function insertAtCursor(textToInsert) {
-    if (currentMode !== 'markdown') return;
-    
-    const startPos = editor.selectionStart;
-    const endPos = editor.selectionEnd;
-    const before = editor.value.substring(0, startPos);
-    const after = editor.value.substring(endPos, editor.value.length);
-    
-    editor.value = before + textToInsert + after;
-    
-    const newPos = startPos + textToInsert.length;
-    editor.setSelectionRange(newPos, newPos);
-    editor.focus();
-    
-    updatePreview();
+    if (currentMode === 'markdown') {
+      const startPos = editor.selectionStart;
+      const endPos = editor.selectionEnd;
+      const before = editor.value.substring(0, startPos);
+      const after = editor.value.substring(endPos, editor.value.length);
+      
+      editor.value = before + textToInsert + after;
+      
+      const newPos = startPos + textToInsert.length;
+      editor.setSelectionRange(newPos, newPos);
+      editor.focus();
+      
+      updatePreview();
+    } else {
+      // 富文本模式下插入文本
+      document.getElementById('rich-editor').focus();
+      document.execCommand('insertText', false, textToInsert);
+      updatePreview();
+    }
   }
 
   // 插入 Markdown 语法
   function insertMarkdownSyntax(prefix, suffix, placeholder) {
-    if (currentMode !== 'markdown') return;
-    
-    const startPos = editor.selectionStart;
-    const endPos = editor.selectionEnd;
-    const selectedText = editor.value.substring(startPos, endPos);
-    const textToInsert = selectedText || placeholder;
-    
-    const before = editor.value.substring(0, startPos);
-    const after = editor.value.substring(endPos, editor.value.length);
-    
-    editor.value = before + prefix + textToInsert + suffix + after;
-    
-    let newPos;
-    if (selectedText) {
-      newPos = startPos + prefix.length + selectedText.length + suffix.length;
+    if (currentMode === 'markdown') {
+      const startPos = editor.selectionStart;
+      const endPos = editor.selectionEnd;
+      const selectedText = editor.value.substring(startPos, endPos);
+      const textToInsert = selectedText || placeholder;
+      
+      const before = editor.value.substring(0, startPos);
+      const after = editor.value.substring(endPos, editor.value.length);
+      
+      editor.value = before + prefix + textToInsert + suffix + after;
+      
+      let newPos;
+      if (selectedText) {
+        newPos = startPos + prefix.length + selectedText.length + suffix.length;
+      } else {
+        newPos = startPos + prefix.length;
+      }
+      
+      editor.setSelectionRange(newPos, newPos);
+      editor.focus();
+      updatePreview();
     } else {
-      newPos = startPos + prefix.length;
+      // 在富文本模式下应用格式
+      document.getElementById('rich-editor').focus();
+      
+      if (prefix === '**' && suffix === '**') { // 加粗
+        document.execCommand('bold', false, null);
+      } else if (prefix === '*' && suffix === '*') { // 斜体
+        document.execCommand('italic', false, null);
+      } else if (prefix === '`' && suffix === '`') { // 代码
+        document.execCommand('fontFamily', false, 'Courier New');
+      } else if (prefix === '# ') { // 标题
+        document.execCommand('formatBlock', false, '<h2>');
+      } else if (prefix === '> ') { // 引用
+        document.execCommand('formatBlock', false, '<blockquote>');
+      } else if (prefix === '- ' || prefix === '1. ') { // 列表
+        document.execCommand('insertUnorderedList', false, null);
+      } else if (prefix.includes('``\n') && suffix.includes('\n```')) { // 代码块
+        // 对整个选定内容应用代码块格式
+        document.execCommand('formatBlock', false, '<pre>');
+      }
+      updatePreview();
     }
+  }
+  
+  // 富文本编辑器格式化函数
+  function formatRichText(command, value = null) {
+    if (currentMode === 'rich') {
+      document.getElementById('rich-editor').focus();
+      document.execCommand(command, false, value);
+      updatePreview();
+    }
+  }
+  
+  // 为富文本编辑器添加选择改变监听
+  function setupRichEditorListeners() {
+    const richEditor = document.getElementById('rich-editor');
     
-    editor.setSelectionRange(newPos, newPos);
-    editor.focus();
-    updatePreview();
+    // 监听富文本编辑器内容变化
+    richEditor.addEventListener('input', function() {
+      if (currentMode === 'rich') {
+        updatePreview();
+      }
+    });
+    
+    // 监听键盘快捷键
+    richEditor.addEventListener('keydown', function(e) {
+      // Ctrl+B -> 加粗
+      if (e.ctrlKey && e.key === 'b') {
+        e.preventDefault();
+        formatRichText('bold');
+      }
+      // Ctrl+I -> 斜体
+      if (e.ctrlKey && e.key === 'i') {
+        e.preventDefault();
+        formatRichText('italic');
+      }
+      // Ctrl+U -> 下划线
+      if (e.ctrlKey && e.key === 'u') {
+        e.preventDefault();
+        formatRichText('underline');
+      }
+    });
   }
 
   // 切换模式
@@ -197,21 +263,103 @@ document.addEventListener('DOMContentLoaded', function() {
   // 绑定事件
   modeToggle.addEventListener('click', toggleEditorMode);
   
-  // 工具栏按钮事件
-  document.getElementById('bold-btn').addEventListener('click', () => insertMarkdownSyntax('**', '**', '加粗文字'));
-  document.getElementById('italic-btn').addEventListener('click', () => insertMarkdownSyntax('*', '*', '斜体文字'));
-  document.getElementById('heading-btn').addEventListener('click', () => insertMarkdownSyntax('# ', '', '标题文字'));
-  document.getElementById('link-btn').addEventListener('click', () => insertMarkdownSyntax('[', ']()', '链接文本'));
-  document.getElementById('image-btn').addEventListener('click', () => insertMarkdownSyntax('![', ']()', '图片描述'));
-  document.getElementById('list-btn').addEventListener('click', () => insertAtCursor('- '));
-  document.getElementById('code-btn').addEventListener('click', () => insertMarkdownSyntax('`', '`', '代码'));  
-  document.getElementById('quote-btn').addEventListener('click', () => insertAtCursor('> '));
-  document.getElementById('numbered-list-btn').addEventListener('click', () => insertAtCursor('1. '));
-  document.getElementById('code-block-btn').addEventListener('click', () => insertMarkdownSyntax('```\n', '\n```', '代码内容'));
+  // 工具栏按钮事件 - 根据当前模式执行不同操作
+  document.getElementById('bold-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('**', '**', '加粗文字');
+    } else {
+      formatRichText('bold');
+    }
+  });
+  
+  document.getElementById('italic-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('*', '*', '斜体文字');
+    } else {
+      formatRichText('italic');
+    }
+  });
+  
+  document.getElementById('heading-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('# ', '', '标题文字');
+    } else {
+      formatRichText('formatBlock', '<h2>');
+    }
+  });
+  
+  document.getElementById('link-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('[', ']()', '链接文本');
+    } else {
+      // 在富文本模式下插入链接
+      const url = prompt('请输入链接地址:');
+      if (url) {
+        formatRichText('createLink', url);
+      }
+    }
+  });
+  
+  document.getElementById('image-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('![', ']()', '图片描述');
+    } else {
+      // 在富文本模式下插入图片
+      const url = prompt('请输入图片地址:');
+      if (url) {
+        document.getElementById('rich-editor').focus();
+        document.execCommand('insertImage', false, url);
+        updatePreview();
+      }
+    }
+  });
+  
+  document.getElementById('list-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertAtCursor('- ');
+    } else {
+      formatRichText('insertUnorderedList');
+    }
+  });
+  
+  document.getElementById('code-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('`', '`', '代码');
+    } else {
+      formatRichText('fontFamily', 'Courier New');
+    }
+  });
+  
+  document.getElementById('quote-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertAtCursor('> ');
+    } else {
+      formatRichText('formatBlock', '<blockquote>');
+    }
+  });
+  
+  document.getElementById('numbered-list-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertAtCursor('1. ');
+    } else {
+      formatRichText('insertOrderedList');
+    }
+  });
+  
+  document.getElementById('code-block-btn').addEventListener('click', () => {
+    if (currentMode === 'markdown') {
+      insertMarkdownSyntax('```\n', '\n```', '代码内容');
+    } else {
+      formatRichText('formatBlock', '<pre>');
+    }
+  });
 
   // 监听编辑器变化
   editor.addEventListener('input', updatePreview);
   
   // 初始化预览
   updatePreview();
+  
+  // 设置富文本编辑器监听
+  setupRichEditorListeners();
 });
