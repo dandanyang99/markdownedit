@@ -6,6 +6,9 @@ document.addEventListener('DOMContentLoaded', function() {
       <button id="mode-toggle" title="切换编辑模式">切换模式</button>
       <span id="mode-indicator">当前: Markdown 模式</span>
       <span style="margin: 0 10px;">|</span>
+      <button id="split-mode-btn" title="分栏预览模式">分栏预览</button>
+      <button id="focus-mode-btn" title="专注模式">专注</button>
+      <button id="theme-toggle-btn" title="夜间模式">🌙</button>
       <button id="bold-btn" title="加粗">B</button>
       <button id="italic-btn" title="斜体">I</button>
       <button id="heading-btn" title="标题">H</button>
@@ -46,6 +49,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 初始化状态
   let currentMode = 'markdown';
+  let splitMode = false; // 分栏预览模式状态
+  let currentFilePath = null; // 记录当前打开的文件路径
+  
+  // 确保在DOM加载完成后执行
+  document.addEventListener('DOMContentLoaded', function() {
+    // 初始化分栏模式状态
+    if (splitMode) {
+      document.querySelector('.container').classList.add('split-mode');
+    }
+  });
 
   // 设置marked选项
   marked.setOptions({
@@ -263,6 +276,95 @@ document.addEventListener('DOMContentLoaded', function() {
   // 绑定事件
   modeToggle.addEventListener('click', toggleEditorMode);
   
+  // 分栏预览模式分隔线拖拽功能
+  let isDragging = false;
+  let startX, startWidth;
+  const splitter = document.createElement('div');
+  splitter.className = 'splitter';
+  document.querySelector('.editor-section').appendChild(splitter);
+
+  splitter.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    startX = e.clientX;
+    startWidth = document.querySelector('.editor-panel').offsetWidth;
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const container = document.querySelector('.container');
+    if (!container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const minWidth = 180; // 左侧最小宽度
+    const maxWidth = containerRect.width - 200; // 右侧最小宽度200px
+
+    let newWidth = startWidth + (e.clientX - startX);
+    newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+
+    document.querySelector('.editor-panel').style.width = `${newWidth}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    isDragging = false;
+    document.body.style.cursor = 'default';
+  });
+
+  // 夜间模式状态
+  let isDarkTheme = false;
+
+  // 夜间模式按钮
+  const themeToggleBtn = document.getElementById('theme-toggle-btn');
+  if (themeToggleBtn) {
+    // 从localStorage加载主题偏好
+    isDarkTheme = localStorage.getItem('dark-theme') === 'true';
+    if (isDarkTheme) {
+      document.body.classList.add('dark-theme');
+      themeToggleBtn.textContent = '☀️';
+    }
+
+    themeToggleBtn.addEventListener('click', () => {
+      isDarkTheme = !isDarkTheme;
+      if (isDarkTheme) {
+        document.body.classList.add('dark-theme');
+        themeToggleBtn.textContent = '☀️';
+        localStorage.setItem('dark-theme', 'true');
+      } else {
+        document.body.classList.remove('dark-theme');
+        themeToggleBtn.textContent = '🌙';
+        localStorage.setItem('dark-theme', 'false');
+      }
+    });
+  }
+
+  // 专注模式状态
+  let focusMode = false;
+
+  // 专注模式按钮
+  const focusModeBtn = document.getElementById('focus-mode-btn');
+  if (focusModeBtn) {
+    focusModeBtn.addEventListener('click', () => {
+      console.log('专注模式按钮被点击');
+      focusMode = !focusMode;
+      const container = document.querySelector('.container');
+      if (container) {
+        if (focusMode) {
+          container.classList.add('focus-mode');
+          focusModeBtn.textContent = '退出专注';
+        } else {
+          container.classList.remove('focus-mode');
+          focusModeBtn.textContent = '专注';
+        }
+        
+        // 强制重新渲染
+        setTimeout(() => {
+          window.dispatchEvent(new Event('resize'));
+        }, 10);
+      }
+    });
+  }
+  
   // 工具栏按钮事件 - 根据当前模式执行不同操作
   document.getElementById('bold-btn').addEventListener('click', () => {
     if (currentMode === 'markdown') {
@@ -362,4 +464,197 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // 设置富文本编辑器监听
   setupRichEditorListeners();
+  
+  // 目录树相关功能
+  const selectFolderBtn = document.getElementById('select-folder-btn');
+  const directoryTree = document.getElementById('directory-tree');
+  
+  // 选择文件夹
+  if (selectFolderBtn) {
+    selectFolderBtn.addEventListener('click', async () => {
+      try {
+        const folderPath = await window.electronAPI.selectFolder();
+        if (folderPath) {
+          const treeData = await window.electronAPI.scanDirectory(folderPath);
+          renderDirectoryTree(treeData, directoryTree, folderPath);
+        }
+      } catch (error) {
+        console.error('选择文件夹时发生错误:', error);
+      }
+    });
+  }
+  
+  // 渲染目录树
+  function renderDirectoryTree(treeData, container, basePath) {
+    container.innerHTML = '';
+    
+    treeData.forEach(item => {
+      const itemElement = createTreeItem(item, basePath);
+      container.appendChild(itemElement);
+    });
+  }
+  
+  // 创建树形节点
+  function createTreeItem(item, basePath) {
+    const itemDiv = document.createElement('div');
+    itemDiv.className = `tree-item ${item.type}`;
+    itemDiv.textContent = item.name;
+    itemDiv.title = item.path;
+    
+    // 如果是文件，添加点击事件打开文件
+    if (item.type === 'file') {
+      itemDiv.addEventListener('click', async (e) => {
+        e.stopPropagation(); // 阻止事件冒泡，避免触发父文件夹的点击事件
+        try {
+          const content = await window.electronAPI.readFile(item.path);
+          
+          // 更新编辑器内容
+          if (currentMode === 'markdown') {
+            editor.value = content;
+            updatePreview(); // 更新预览
+          } else {
+            // 切换到markdown模式再加载内容，避免格式冲突
+            if (currentMode === 'rich') {
+              toggleEditorMode(); // 切换回markdown模式
+            }
+            editor.value = content;
+            updatePreview();
+          }
+          
+          // 记录当前文件路径
+          currentFilePath = item.path;
+          
+          // 更新选中状态
+          document.querySelectorAll('.tree-item.selected').forEach(el => {
+            el.classList.remove('selected');
+          });
+          itemDiv.classList.add('selected');
+        } catch (error) {
+          console.error('读取文件时发生错误:', error);
+        }
+      });
+    } 
+    // 如果是文件夹，展开/收起子项
+    else if (item.type === 'folder' && item.children && item.children.length > 0) {
+      // 添加展开/折叠图标
+      const expandIcon = document.createElement('span');
+      expandIcon.className = 'tree-expand-icon collapsed';
+      itemDiv.insertBefore(expandIcon, itemDiv.firstChild);
+      
+      const childrenContainer = document.createElement('div');
+      childrenContainer.className = 'tree-children';
+      childrenContainer.style.display = 'none';
+      childrenContainer.style.marginLeft = '16px';
+      
+      item.children.forEach(child => {
+        const childElement = createTreeItem(child, basePath);
+        childrenContainer.appendChild(childElement);
+      });
+      
+      itemDiv.addEventListener('click', (e) => {
+        if (e.target !== expandIcon) {
+          // 如果点击的不是展开图标，则只更新选中状态，不展开/折叠
+          document.querySelectorAll('.tree-item.selected').forEach(el => {
+            el.classList.remove('selected');
+          });
+          itemDiv.classList.add('selected');
+          return;
+        }
+        
+        // 只有点击展开图标才展开/折叠
+        e.stopPropagation();
+        const isExpanded = childrenContainer.style.display === 'block';
+        childrenContainer.style.display = isExpanded ? 'none' : 'block';
+        
+        // 更新展开图标
+        expandIcon.className = isExpanded 
+          ? 'tree-expand-icon collapsed'
+          : 'tree-expand-icon expanded';
+      });
+      
+      // 默认展开根级文件夹
+      setTimeout(() => {
+        childrenContainer.style.display = 'block';
+        expandIcon.className = 'tree-expand-icon expanded';
+      }, 100);
+      
+      itemDiv.appendChild(childrenContainer);
+    }
+    
+    return itemDiv;
+  }
+  
+  // 保存文件
+  async function saveCurrentFile() {
+    if (currentFilePath) {
+      try {
+        let content;
+        if (currentMode === 'markdown') {
+          content = editor.value;
+        } else {
+          const richContent = document.getElementById('rich-editor').innerHTML;
+          content = htmlToMarkdown(richContent);
+        }
+        
+        const success = await window.electronAPI.saveFile(currentFilePath, content);
+        if (success) {
+          console.log('文件保存成功');
+        } else {
+          console.error('文件保存失败');
+        }
+      } catch (error) {
+        console.error('保存文件时发生错误:', error);
+      }
+    }
+  }
+  
+  // 添加 Ctrl+S 快捷键保存
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.key === 's') {
+      e.preventDefault();
+      saveCurrentFile();
+    }
+  });
 });
+
+// 创建 Electron API 接口（模拟）
+window.electronAPI = {
+  selectFolder: async () => {
+    // 这个函数将在主进程中实现
+    if (window.require) {
+      const { ipcRenderer } = window.require('electron');
+      return await ipcRenderer.invoke('select-folder');
+    } else {
+      // 在浏览器环境中模拟
+      alert('此功能仅在Electron应用中可用');
+      return null;
+    }
+  },
+  scanDirectory: async (folderPath) => {
+    if (window.require) {
+      const { ipcRenderer } = window.require('electron');
+      return await ipcRenderer.invoke('scan-directory', folderPath);
+    } else {
+      // 在浏览器环境中模拟
+      return [];
+    }
+  },
+  readFile: async (filePath) => {
+    if (window.require) {
+      const { ipcRenderer } = window.require('electron');
+      return await ipcRenderer.invoke('read-file', filePath);
+    } else {
+      // 在浏览器环境中模拟
+      return '';
+    }
+  },
+  saveFile: async (filePath, content) => {
+    if (window.require) {
+      const { ipcRenderer } = window.require('electron');
+      return await ipcRenderer.invoke('save-file', filePath, content);
+    } else {
+      // 在浏览器环境中模拟
+      return false;
+    }
+  }
+};

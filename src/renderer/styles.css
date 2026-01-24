@@ -8,9 +8,193 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   height: 100vh;
   overflow: hidden;
+  background-color: #f5f5f5;
+}
+
+#app-container {
+  display: flex;
+  height: 100vh;
+}
+
+#sidebar {
+  width: 250px;
+  background-color: #fff;
+  border-right: 1px solid #ddd;
   display: flex;
   flex-direction: column;
-  background-color: #f5f5f5;
+  overflow: hidden;
+}
+
+#folder-selector {
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+#select-folder-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  background-color: #f8f8f8;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+#select-folder-btn:hover {
+  background-color: #e6e6e6;
+}
+
+#directory-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  font-size: 14px;
+}
+
+/* 目录树样式 */
+.tree-item {
+  padding: 3px 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  border-radius: 2px;
+  margin: 1px 0;
+  position: relative;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.tree-item.folder {
+  font-weight: normal;
+  color: #333;
+}
+
+.tree-item.file {
+  color: #555;
+  padding-left: 0;
+}
+
+.tree-item.folder::before {
+  content: '📁';
+  margin-right: 6px;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.tree-item.file::before {
+  content: '📄';
+  margin-right: 6px;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.tree-expand-icon {
+  display: inline-block;
+  margin-right: 6px;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 16px;
+  color: #666;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.tree-expand-icon.expanded::before {
+  content: '▼';
+}
+
+.tree-expand-icon.collapsed::before {
+  content: '►';
+}
+
+.tree-item:hover {
+  background-color: #e6f0fa;
+  color: #000;
+}
+
+.tree-item.selected {
+  background-color: #cce5ff;
+  color: #000;
+}
+
+.tree-children {
+  margin-left: 16px;
+  padding-left: 0;
+  display: block;
+}
+
+.tree-indent {
+  margin-left: 16px;
+}
+
+/* Windows 资源管理器风格的选中状态 */
+.tree-item.selected {
+  background-color: #4a90e2;
+  color: white;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.5) inset;
+}
+
+.tree-item.selected:hover {
+  background-color: #3a7bd5;
+}
+
+/* 鼠标悬停时的图标颜色变化 */
+.tree-item:hover .tree-expand-icon {
+  opacity: 1;
+  color: #333;
+}
+
+/* 文件夹和文件图标的颜色调整 */
+.tree-item.folder::before {
+  color: #333;
+}
+
+.tree-item.file::before {
+  color: #555;
+}
+
+/* 增加一些间距和视觉层次 */
+.tree-item {
+  padding: 4px 6px;
+}
+
+.tree-item.folder {
+  font-weight: 500;
+}
+
+/* 为展开/折叠图标添加背景色 */
+.tree-expand-icon {
+  background-color: #f0f0f0;
+  border-radius: 2px;
+  margin-right: 8px;
+}
+
+.tree-expand-icon:hover {
+  background-color: #e0e0e0;
+}
+
+/* 为目录树添加边框 */
+#directory-tree {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: white;
+}
+
+/* 为文件夹和文件添加不同的字体颜色 */
+.tree-item.folder {
+  color: #222;
+}
+
+.tree-item.file {
+  color: #444;
+}
+
+#main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .container {
@@ -54,6 +238,34 @@ body {
   display: flex;
 }
 
+.container.split-mode {
+  display: flex !important;
+  height: calc(100vh - 40px) !important;
+}
+
+.container.split-mode .editor-container {
+  display: flex !important;
+  flex: 1 !important;
+}
+
+.container.split-mode .editor-section {
+  display: flex !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+.container.split-mode .editor-panel {
+  flex: 1 !important;
+  border-right: 1px solid #ddd !important;
+  overflow: auto !important;
+}
+
+.container.split-mode .preview-panel {
+  flex: 1 !important;
+  border-left: 1px solid #ddd !important;
+  overflow: auto !important;
+}
+
 .editor-panel, .preview-panel {
   flex: 1;
   padding: 10px;
@@ -69,9 +281,9 @@ body {
   height: 100%;
   border: 1px solid #ccc;
   resize: none;
-  font-family: 'Courier New', monospace;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
   outline: none;
   padding: 10px;
 }
@@ -186,4 +398,134 @@ body {
   color: #666;
   display: flex;
   justify-content: space-between;
+}
+
+.container.focus-mode {
+  display: flex !important;
+}
+
+.container.focus-mode #sidebar {
+  display: none !important;
+}
+
+.container.focus-mode .toolbar {
+  display: none !important;
+}
+
+.container.focus-mode .status-bar {
+  display: none !important;
+}
+
+.container.focus-mode .editor-container {
+  width: 100%;
+  height: 100vh;
+  margin: 0;
+  border-radius: 0;
+  padding: 20px; /* 根据原型文档，专注模式四周留白20px */
+  background-color: #F9F9F9; /* 浅色模式默认背景色 */
+}
+
+/* 夜间模式下的专注模式样式 */
+body.dark-theme .container.focus-mode .editor-container {
+  background-color: #1A1A1A; /* 深色模式背景色 */
+}
+
+/* 分栏预览模式分隔线样式 */
+.splitter {
+  width: 1px;
+  height: 100%;
+  background-color: #E0E0E0;
+  cursor: col-resize;
+  position: relative;
+}
+
+.splitter::after {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 0;
+  width: 17px;
+  height: 100%;
+  border-left: 1px dashed #ccc;
+  z-index: 1;
+}
+
+.splitter:hover::after,
+.is-dragging .splitter::after {
+  border-color: #4285F4;
+}
+
+/* 夜间模式样式 */
+body.dark-theme {
+  background-color: #1E1E1E;
+  color: #E0E0E0;
+}
+
+body.dark-theme #app-container {
+  border-color: #333333;
+}
+
+body.dark-theme #sidebar {
+  background-color: #1A1A1A;
+  border-color: #333333;
+}
+
+body.dark-theme #directory-tree {
+  background-color: #1A1A1A;
+  border-color: #333333;
+}
+
+body.dark-theme .tree-item {
+  color: #E0E0E0;
+}
+
+body.dark-theme .tree-item:hover {
+  background-color: #333333;
+}
+
+body.dark-theme .tree-item.selected {
+  background-color: #4A6FA5;
+}
+
+body.dark-theme .toolbar {
+  background-color: #1A1A1A;
+  border-color: #333333;
+}
+
+body.dark-theme .toolbar button {
+  background-color: #1A1A1A;
+  border-color: #555555;
+  color: #E0E0E0;
+}
+
+body.dark-theme .toolbar button:hover {
+  background-color: #333333;
+}
+
+body.dark-theme .editor-panel {
+  border-color: #333333;
+}
+
+body.dark-theme .editor-panel textarea,
+body.dark-theme .editor-panel div[contenteditable="true"] {
+  background-color: #1A1A1A;
+  color: #E0E0E0;
+  caret-color: #4285F4;
+}
+
+body.dark-theme .preview-panel {
+  background-color: #1A1A1A;
+  border-color: #333333;
+}
+
+body.dark-theme .preview-content h1,
+body.dark-theme .preview-content h2,
+body.dark-theme .preview-content h3 {
+  color: #FFFFFF;
+}
+
+body.dark-theme .status-bar {
+  background-color: #1A1A1A;
+  border-color: #333333;
+  color: #999999;
 }

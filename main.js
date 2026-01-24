@@ -1,5 +1,7 @@
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const { dialog } = require('electron');
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (require('electron-squirrel-startup')) {
@@ -81,4 +83,105 @@ app.whenReady().then(() => {
 
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
+});
+
+// IPC 通信处理
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openDirectory']
+  });
+  
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  
+  return null;
+});
+
+ipcMain.handle('scan-directory', async (event, folderPath) => {
+  try {
+    const items = fs.readdirSync(folderPath);
+    const treeData = [];
+    
+    for (const item of items) {
+      const fullPath = path.join(folderPath, item);
+      const stat = fs.statSync(fullPath);
+      
+      if (stat.isDirectory()) {
+        // 检查目录中是否包含 .md 文件
+        const dirItems = fs.readdirSync(fullPath);
+        const hasMdFiles = dirItems.some(file => file.toLowerCase().endsWith('.md'));
+        
+        if (hasMdFiles) {
+          treeData.push({
+            name: item,
+            type: 'folder',
+            path: fullPath,
+            children: scanMdFilesInFolder(fullPath)
+          });
+        }
+      } else if (item.toLowerCase().endsWith('.md')) {
+        treeData.push({
+          name: item,
+          type: 'file',
+          path: fullPath
+        });
+      }
+    }
+    
+    return treeData;
+  } catch (error) {
+    console.error('扫描目录时发生错误:', error);
+    return [];
+  }
+});
+
+// 辅助函数：递归扫描文件夹中的 .md 文件
+function scanMdFilesInFolder(folderPath) {
+  const items = fs.readdirSync(folderPath);
+  const children = [];
+  
+  for (const item of items) {
+    const fullPath = path.join(folderPath, item);
+    const stat = fs.statSync(fullPath);
+    
+    if (stat.isDirectory()) {
+      const subChildren = scanMdFilesInFolder(fullPath);
+      if (subChildren.length > 0) {
+        children.push({
+          name: item,
+          type: 'folder',
+          path: fullPath,
+          children: subChildren
+        });
+      }
+    } else if (item.toLowerCase().endsWith('.md')) {
+      children.push({
+        name: item,
+        type: 'file',
+        path: fullPath
+      });
+    }
+  }
+  
+  return children;
+}
+
+ipcMain.handle('read-file', async (event, filePath) => {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    console.error('读取文件时发生错误:', error);
+    return '';
+  }
+});
+
+ipcMain.handle('save-file', async (event, filePath, content) => {
+  try {
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return true;
+  } catch (error) {
+    console.error('保存文件时发生错误:', error);
+    return false;
+  }
 });
