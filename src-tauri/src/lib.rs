@@ -1,6 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use base64::{engine::general_purpose, Engine as _};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,6 +12,13 @@ struct TreeNode {
     kind: String, // "file" | "folder"
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<TreeNode>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteBinaryFileBase64Args {
+    path: String,
+    content_base64: String,
 }
 
 fn scan_md_tree(dir: &Path) -> Result<Vec<TreeNode>, String> {
@@ -106,12 +115,42 @@ fn write_text_file(path: String, content: String) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| format!("write failed: {e}"))
 }
 
+#[tauri::command]
+fn write_binary_file_base64(args: WriteBinaryFileBase64Args) -> Result<(), String> {
+    let bytes = general_purpose::STANDARD
+        .decode(args.content_base64.as_bytes())
+        .map_err(|e| format!("base64 decode failed: {e}"))?;
+
+    let p = PathBuf::from(&args.path);
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {e}"))?;
+    }
+
+    fs::write(&args.path, bytes).map_err(|e| format!("write failed: {e}"))
+}
+
+#[tauri::command]
+fn copy_file(from: String, to: String) -> Result<(), String> {
+    let dst = PathBuf::from(&to);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {e}"))?;
+    }
+
+    fs::copy(&from, &to).map(|_| ()).map_err(|e| format!("copy failed: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![scan_workspace, read_text_file, write_text_file])
+        .invoke_handler(tauri::generate_handler![
+            scan_workspace,
+            read_text_file,
+            write_text_file,
+            write_binary_file_base64,
+            copy_file
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

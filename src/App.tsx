@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -41,14 +41,99 @@ type RecentFile = {
 
 type EditorMode = "wysiwyg" | "markdown" | "split";
 type ThemeMode = "light" | "dark";
+type SidebarTab = "files" | "outline";
 
 const RECENTS_KEY = "markdownedit.recents.v1";
 const THEME_KEY = "markdownedit.theme.v1";
+
+const ImageWithMdSrc = Image.extend({
+  addAttributes() {
+    return {
+      ...(this.parent?.() ?? {}),
+      // Keep a "markdown source" alongside the displayable src (which may be convertFileSrc(...)).
+      mdSrc: {
+        default: null,
+        parseHTML: (element) => (element as HTMLElement).getAttribute("data-md-src"),
+        renderHTML: (attrs) => (attrs.mdSrc ? { "data-md-src": attrs.mdSrc } : {}),
+      },
+    };
+  },
+});
 
 function getFileName(p: string) {
   // Handle both Windows and POSIX paths.
   const parts = p.split(/[/\\\\]/);
   return parts[parts.length - 1] || p;
+}
+
+function getDirName(p: string) {
+  const parts = p.split(/[/\\\\]/);
+  if (parts.length <= 1) return "";
+  parts.pop();
+  const sep = p.includes("\\") ? "\\" : "/";
+  const joined = parts.join(sep);
+  // Preserve root separators (e.g. "C:\\" or "/").
+  if (sep === "\\" && /^[A-Za-z]:$/.test(joined)) return `${joined}\\`;
+  if (sep === "/" && joined === "") return "/";
+  return joined;
+}
+
+function joinOsPath(a: string, b: string) {
+  if (!a) return b;
+  const sep = a.includes("\\") ? "\\" : "/";
+  const part = sep === "\\" ? b.replace(/\//g, "\\") : b.replace(/\\/g, "/");
+  if (a.endsWith(sep)) return `${a}${part}`;
+  return `${a}${sep}${part}`;
+}
+
+function isWindowsAbsPath(p: string) {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function isProbablyRemoteUrl(src: string) {
+  return /^(https?:|data:|blob:|file:)/i.test(src);
+}
+
+function safeConvertFileSrc(filePath: string) {
+  try {
+    return convertFileSrc(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer) {
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function getExtFromNameOrType(name: string, mime: string) {
+  const m = name.match(/\.([a-zA-Z0-9]+)$/);
+  const ext = (m?.[1] ?? "").toLowerCase();
+  if (ext && ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].includes(ext)) return ext === "jpeg" ? "jpg" : ext;
+  const t = mime.toLowerCase();
+  if (t === "image/png") return "png";
+  if (t === "image/jpeg") return "jpg";
+  if (t === "image/gif") return "gif";
+  if (t === "image/webp") return "webp";
+  if (t === "image/bmp") return "bmp";
+  if (t === "image/svg+xml") return "svg";
+  return "png";
+}
+
+function resolveLocalImageAbsPath(baseDir: string | null, src: string) {
+  const raw = (src || "").trim();
+  if (!raw) return null;
+  if (isProbablyRemoteUrl(raw)) return null;
+  if (isWindowsAbsPath(raw) || raw.startsWith("/")) return raw;
+  if (!baseDir) return null;
+  const rel = raw.replace(/^[.][\\/]/, "");
+  return joinOsPath(baseDir, rel);
 }
 
 function loadRecents(): RecentFile[] {
@@ -80,6 +165,10 @@ function loadTheme(): ThemeMode {
   return "light";
 }
 
+type OutlineItem =
+  | { key: string; level: number; text: string; kind: "md"; line: number; offset: number }
+  | { key: string; level: number; text: string; kind: "pm"; pos: number };
+
 function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [workspaceTree, setWorkspaceTree] = useState<TreeNode | null>(null);
@@ -98,11 +187,28 @@ function App() {
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [headingMenuOpen, setHeadingMenuOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("files");
+  const [cursorLine, setCursorLine] = useState(1);
+  const [outlineTick, setOutlineTick] = useState(0);
 
   const [recents, setRecents] = useState<RecentFile[]>(() => loadRecents());
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const lastAppliedMdToWysiwygRef = useRef<string | null>(null);
   const wysiwygSyncTimerRef = useRef<number | null>(null);
+
+  const updateCursorLineFromTextarea = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const idx = el.selectionStart ?? 0;
+    const text = el.value ?? "";
+    const line = text.slice(0, idx).split("\n").length;
+    setCursorLine(Math.max(1, line));
+  }, []);
+
+  useEffect(() => {
+    if (mode === "wysiwyg") return;
+    requestAnimationFrame(() => updateCursorLineFromTextarea());
+  }, [mode, updateCursorLineFromTextarea]);
 
   const md = useMemo(
     () => {
@@ -116,6 +222,17 @@ function App() {
       inst.use(mdFootnote);
       inst.use(mdMark);
       inst.use(mdTaskLists, { enabled: true, label: true, labelAfter: false });
+      const fallback =
+        inst.renderer.rules.image ??
+        ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+      inst.renderer.rules.image = (tokens, idx, options, env, self) => {
+        const token = tokens[idx];
+        const rawSrc = token.attrGet("src") ?? "";
+        const baseDir = (env as any)?.baseDir as string | null | undefined;
+        const abs = resolveLocalImageAbsPath(baseDir ?? null, rawSrc);
+        if (abs) token.attrSet("src", safeConvertFileSrc(abs));
+        return fallback(tokens, idx, options, env, self);
+      };
       return inst;
     },
     [],
@@ -130,6 +247,20 @@ function App() {
       breaks: true,
     });
     inst.use(mdMark);
+    const fallback =
+      inst.renderer.rules.image ??
+      ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+    inst.renderer.rules.image = (tokens, idx, options, env, self) => {
+      const token = tokens[idx];
+      const rawSrc = token.attrGet("src") ?? "";
+      const baseDir = (env as any)?.baseDir as string | null | undefined;
+      const abs = resolveLocalImageAbsPath(baseDir ?? null, rawSrc);
+      if (abs) {
+        token.attrSet("data-md-src", rawSrc);
+        token.attrSet("src", safeConvertFileSrc(abs));
+      }
+      return fallback(tokens, idx, options, env, self);
+    };
     return inst;
   }, []);
 
@@ -198,6 +329,20 @@ function App() {
       replacement: (content: string) => `==${content}==`,
     });
 
+    // Prefer the original markdown image src (data-md-src) so local images stay relative (img/...)
+    // even though the displayed src may be a convertFileSrc(...) URL.
+    svc.addRule("imageMdSrc", {
+      filter: "img",
+      replacement: (_content: string, node: Node) => {
+        const img = node as HTMLImageElement;
+        const altRaw = img.getAttribute("alt") ?? "";
+        const alt = altRaw.replace(/\]/g, "\\]");
+        const src = (img.getAttribute("data-md-src") || img.getAttribute("src") || "").trim();
+        if (!src) return "";
+        return `![${alt}](${src})`;
+      },
+    });
+
     return svc;
   }, []);
 
@@ -208,7 +353,7 @@ function App() {
       }),
       Highlight,
       Link.configure({ openOnClick: false }),
-      Image,
+      ImageWithMdSrc,
       Table.configure({ resizable: true }),
       TableRow,
       TableHeader,
@@ -220,6 +365,7 @@ function App() {
     },
     onUpdate: ({ editor }) => {
       setDirty(true);
+      setOutlineTick((n) => n + 1);
       // Keep markdown source-of-truth reasonably up-to-date while typing in WYSIWYG,
       // so that status bar + preview (split) stay correct.
       if (wysiwygSyncTimerRef.current) window.clearTimeout(wysiwygSyncTimerRef.current);
@@ -231,9 +377,24 @@ function App() {
     },
   });
 
+  // Track selection changes in WYSIWYG so outline highlight stays in sync.
+  useEffect(() => {
+    if (!wysiwyg) return;
+    const onSel = () => setOutlineTick((n) => n + 1);
+    wysiwyg.on("selectionUpdate", onSel);
+    return () => {
+      wysiwyg.off("selectionUpdate", onSel);
+    };
+  }, [wysiwyg]);
+
   const currentFileName = useMemo(() => {
     if (!currentFilePath) return "未命名.md";
     return getFileName(currentFilePath);
+  }, [currentFilePath]);
+
+  const currentFileDir = useMemo(() => {
+    if (!currentFilePath) return null;
+    return getDirName(currentFilePath);
   }, [currentFilePath]);
 
   const updateRecents = useCallback((path: string) => {
@@ -271,24 +432,28 @@ function App() {
         setCurrentFilePath(path);
         setContent(text);
         setDirty(false);
+        setCursorLine(1);
         updateRecents(path);
         // If currently in WYSIWYG, update it to show the opened file.
         if (mode === "wysiwyg" && wysiwyg) {
-          const html = mdForWysiwyg.render(text);
+          const html = mdForWysiwyg.render(text, { baseDir: getDirName(path) });
           wysiwyg.commands.setContent(html, { emitUpdate: false });
           lastAppliedMdToWysiwygRef.current = text;
         }
         // Best-effort focus back to editor.
         queueMicrotask(() => {
           if (mode === "wysiwyg") wysiwyg?.commands.focus("start");
-          else editorRef.current?.focus();
+          else {
+            editorRef.current?.focus();
+            updateCursorLineFromTextarea();
+          }
         });
       } catch (e) {
         console.error(e);
         alert(`打开失败：${path}`);
       }
     },
-    [md, mode, updateRecents, wysiwyg],
+    [mdForWysiwyg, mode, updateCursorLineFromTextarea, updateRecents, wysiwyg],
   );
 
   const pickFile = useCallback(async () => {
@@ -402,10 +567,13 @@ function App() {
       // When leaving plain editor, keep focus behavior consistent.
       queueMicrotask(() => {
         if (next === "wysiwyg") wysiwyg?.commands.focus("start");
-        else editorRef.current?.focus();
+        else {
+          editorRef.current?.focus();
+          updateCursorLineFromTextarea();
+        }
       });
     },
-    [mode, turndown, wysiwyg],
+    [mode, turndown, updateCursorLineFromTextarea, wysiwyg],
   );
 
   const toggleTheme = useCallback(() => {
@@ -442,7 +610,206 @@ function App() {
     setCurrentFilePath(null);
     setContent("");
     setDirty(false);
+    setCursorLine(1);
   }, [mode, wysiwyg]);
+
+  const parseMarkdownOutline = useCallback((text: string): OutlineItem[] => {
+    const items: OutlineItem[] = [];
+    let inFence: "```" | "~~~" | null = null;
+    let i = 0;
+    let lineNo = 0;
+
+    while (i <= text.length) {
+      const j = text.indexOf("\n", i);
+      const end = j === -1 ? text.length : j;
+      const raw = text.slice(i, end);
+      const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+      const offset = i;
+      lineNo += 1;
+
+      const fenceMatch = line.match(/^\s*(```|~~~)/);
+      if (fenceMatch) {
+        const token = fenceMatch[1] as "```" | "~~~";
+        if (inFence === token) inFence = null;
+        else if (!inFence) inFence = token;
+      } else if (!inFence) {
+        const m = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+        if (m) {
+          const level = m[1].length;
+          const text = m[2].trim();
+          if (text) {
+            items.push({ key: `md:${offset}`, kind: "md", level, text, line: lineNo, offset });
+          }
+        }
+      }
+
+      if (j === -1) break;
+      i = j + 1;
+    }
+
+    return items;
+  }, []);
+
+  const outlineItems: OutlineItem[] = useMemo(() => {
+    // Prefer TipTap doc outline while in WYSIWYG (more accurate than re-parsing markdown).
+    if (mode === "wysiwyg" && wysiwyg) {
+      const out: OutlineItem[] = [];
+      wysiwyg.state.doc.descendants((node, pos) => {
+        if (node.type.name === "heading") {
+          const level = (node.attrs as any)?.level ?? 1;
+          const text = node.textContent.trim();
+          if (text) out.push({ key: `pm:${pos}`, kind: "pm", level, text, pos });
+        }
+      });
+      void outlineTick;
+      return out;
+    }
+    return parseMarkdownOutline(content);
+  }, [content, mode, outlineTick, parseMarkdownOutline, wysiwyg]);
+
+  const activeOutlineKey = useMemo(() => {
+    if (!outlineItems.length) return null;
+    if (mode === "wysiwyg" && wysiwyg) {
+      const sel = wysiwyg.state.selection.from;
+      let active: OutlineItem | null = null;
+      for (const it of outlineItems) {
+        if (it.kind !== "pm") continue;
+        if (it.pos <= sel) active = it;
+        else break;
+      }
+      return active?.key ?? null;
+    }
+    // Markdown/ split: based on current textarea cursor line.
+    let active: OutlineItem | null = null;
+    for (const it of outlineItems) {
+      if (it.kind !== "md") continue;
+      if (it.line <= cursorLine) active = it;
+      else break;
+    }
+    return active?.key ?? null;
+  }, [cursorLine, mode, outlineItems, wysiwyg]);
+
+  const ensureCurrentFilePath = useCallback(async () => {
+    if (currentFilePath) return currentFilePath;
+    const selected = await save({
+      defaultPath: "未命名.md",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!selected) return null;
+    setCurrentFilePath(selected);
+    setDirty(true);
+    return selected;
+  }, [currentFilePath]);
+
+  const insertTextAtTextareaCursor = useCallback(
+    (text: string) => {
+      const el = editorRef.current;
+      if (!el) {
+        setContent((prev) => prev + text);
+        setDirty(true);
+        return;
+      }
+
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? start;
+      const base = el.value ?? content;
+      const next = base.slice(0, start) + text + base.slice(end);
+      setContent(next);
+      setDirty(true);
+      queueMicrotask(() => {
+        el.focus();
+        const nextPos = start + text.length;
+        el.setSelectionRange(nextPos, nextPos);
+        updateCursorLineFromTextarea();
+      });
+    },
+    [content, updateCursorLineFromTextarea],
+  );
+
+  const persistPastedImage = useCallback(
+    async (bytesBase64: string, ext: string, altText: string) => {
+      const docPath = await ensureCurrentFilePath();
+      if (!docPath) return null;
+
+      const dir = getDirName(docPath);
+      const safeExt = ext.toLowerCase();
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
+      const rand = Math.random().toString(16).slice(2, 8);
+      const fileName = `${stamp}-${rand}.${safeExt}`;
+      const abs = joinOsPath(joinOsPath(dir, "img"), fileName);
+      await invoke("write_binary_file_base64", { path: abs, contentBase64: bytesBase64 });
+      return { rel: `img/${fileName}`, abs, alt: altText || fileName };
+    },
+    [ensureCurrentFilePath],
+  );
+
+  const persistImageFromFilePath = useCallback(
+    async (srcPath: string) => {
+      const docPath = await ensureCurrentFilePath();
+      if (!docPath) return null;
+
+      const dir = getDirName(docPath);
+      const name = getFileName(srcPath);
+      const ext = getExtFromNameOrType(name, "");
+      const alt = name.replace(/\.[a-zA-Z0-9]+$/, "");
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
+      const rand = Math.random().toString(16).slice(2, 8);
+      const fileName = `${stamp}-${rand}.${ext}`;
+      const abs = joinOsPath(joinOsPath(dir, "img"), fileName);
+      await invoke("copy_file", { from: srcPath, to: abs });
+      return { rel: `img/${fileName}`, abs, alt: alt || fileName };
+    },
+    [ensureCurrentFilePath],
+  );
+
+  const insertSavedImage = useCallback(
+    (img: { rel: string; abs: string; alt: string }) => {
+      if (mode === "wysiwyg" && wysiwyg) {
+        const src = safeConvertFileSrc(img.abs);
+        (wysiwyg.chain().focus() as any)
+          .insertContent([{ type: "image", attrs: { src, mdSrc: img.rel, alt: img.alt } }, { type: "paragraph" }])
+          .run();
+        setDirty(true);
+        return;
+      }
+      insertTextAtTextareaCursor(`\n![${img.alt}](${img.rel})\n`);
+    },
+    [insertTextAtTextareaCursor, mode, wysiwyg],
+  );
+
+  const insertImagesFromFiles = useCallback(
+    async (files: File[]) => {
+      try {
+        for (const f of files) {
+          const ext = getExtFromNameOrType(f.name, f.type);
+          const alt = f.name.replace(/\.[a-zA-Z0-9]+$/, "") || "image";
+          const base64 = arrayBufferToBase64(await f.arrayBuffer());
+          const saved = await persistPastedImage(base64, ext, alt);
+          if (saved) insertSavedImage(saved);
+        }
+      } catch (e) {
+        console.error(e);
+        alert("图片插入失败（保存图片到 img/ 失败）");
+      }
+    },
+    [insertSavedImage, persistPastedImage],
+  );
+
+  const pickAndInsertImage = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] }],
+      });
+      if (!selected) return;
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      const saved = await persistImageFromFilePath(path);
+      if (saved) insertSavedImage(saved);
+    } catch (e) {
+      console.error(e);
+      alert("插入图片失败（请检查 dialog 权限或图片文件是否可读）");
+    }
+  }, [insertSavedImage, persistImageFromFilePath]);
 
   const insertIntoTextarea = useCallback((prefix: string, suffix = "", placeholder = "") => {
     const el = editorRef.current;
@@ -539,9 +906,7 @@ function App() {
             return;
           }
           case "image": {
-            const src = window.prompt("输入图片 URL")?.trim();
-            if (!src) return;
-            (wysiwyg.chain().focus() as any).setImage({ src }).run();
+            void pickAndInsertImage();
             return;
           }
           case "table":
@@ -600,9 +965,7 @@ function App() {
           return;
         }
         case "image": {
-          const url = window.prompt("输入图片 URL")?.trim();
-          if (!url) return;
-          insertIntoTextarea("![](", ")", url);
+          void pickAndInsertImage();
           return;
         }
         case "table":
@@ -615,7 +978,7 @@ function App() {
           return;
       }
     },
-    [insertIntoTextarea, mode, prefixLinesInTextarea, wysiwyg],
+    [insertIntoTextarea, mode, pickAndInsertImage, prefixLinesInTextarea, wysiwyg],
   );
 
   const modeTabs = (
@@ -656,10 +1019,10 @@ function App() {
     if (!wysiwyg) return;
 
     if (lastAppliedMdToWysiwygRef.current === content) return;
-    const html = mdForWysiwyg.render(content);
+    const html = mdForWysiwyg.render(content, { baseDir: currentFileDir });
     wysiwyg.commands.setContent(html, { emitUpdate: false });
     lastAppliedMdToWysiwygRef.current = content;
-  }, [content, mdForWysiwyg, mode, wysiwyg]);
+  }, [content, currentFileDir, mdForWysiwyg, mode, wysiwyg]);
 
   // Split pane drag (basic).
   useEffect(() => {
@@ -736,12 +1099,12 @@ function App() {
   }, [content]);
 
   const previewHtml = useMemo(() => {
-    const rendered = md.render(content);
+    const rendered = md.render(content, { baseDir: currentFileDir });
     return DOMPurify.sanitize(rendered, {
       ADD_TAGS: ["section", "mark", "input", "label", "sup"],
       ADD_ATTR: ["id", "class", "for", "type", "checked", "disabled", "aria-label", "aria-describedby", "role"],
     });
-  }, [content, md]);
+  }, [content, currentFileDir, md]);
 
   return (
     <div className="app">
@@ -1047,32 +1410,94 @@ function App() {
           </div>
 
           <div className="sidebarBody">
-            {workspaceTree ? (
-              <div className="tree">{renderTreeNode(workspaceTree)}</div>
-            ) : (
-              <div className="emptyHint">点击“选择工作区”开始。</div>
-            )}
-
-            <div className="recents">
-              <div className="recentsHeader">最近打开</div>
-              {recents.length ? (
-                <div className="recentsList">
-                  {recents.map((r) => (
-                    <button
-                      key={r.path}
-                      type="button"
-                      className="recentItem"
-                      onClick={() => void openFileByPath(r.path)}
-                      title={r.path}
-                    >
-                      {r.name}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="emptyHintSmall">暂无</div>
-              )}
+            <div className="sidebarTabs" role="tablist" aria-label="侧边栏">
+              <button
+                type="button"
+                role="tab"
+                className={`sidebarTab ${sidebarTab === "files" ? "active" : ""}`}
+                aria-selected={sidebarTab === "files"}
+                onClick={() => setSidebarTab("files")}
+              >
+                文件列表
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={`sidebarTab ${sidebarTab === "outline" ? "active" : ""}`}
+                aria-selected={sidebarTab === "outline"}
+                onClick={() => setSidebarTab("outline")}
+              >
+                大纲
+              </button>
             </div>
+
+            {sidebarTab === "files" ? (
+              <>
+                {workspaceTree ? (
+                  <div className="tree">{renderTreeNode(workspaceTree)}</div>
+                ) : (
+                  <div className="emptyHint">点击“选择工作区”开始。</div>
+                )}
+
+                <div className="recents">
+                  <div className="recentsHeader">最近打开</div>
+                  {recents.length ? (
+                    <div className="recentsList">
+                      {recents.map((r) => (
+                        <button
+                          key={r.path}
+                          type="button"
+                          className="recentItem"
+                          onClick={() => void openFileByPath(r.path)}
+                          title={r.path}
+                        >
+                          {r.name}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="emptyHintSmall">暂无</div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="outline">
+                {!currentFilePath && !content ? (
+                  <div className="emptyHint">未打开文件。</div>
+                ) : outlineItems.length ? (
+                  <div className="outlineList">
+                    {outlineItems.map((it) => (
+                      <button
+                        key={it.key}
+                        type="button"
+                        className={`outlineItem ${activeOutlineKey === it.key ? "active" : ""}`}
+                        style={{ paddingLeft: `${(it.level - 1) * 12 + 8}px` }}
+                        onClick={() => {
+                          if (it.kind === "pm") {
+                            if (!wysiwyg) return;
+                            wysiwyg.chain().focus().setTextSelection(it.pos + 1).scrollIntoView().run();
+                            return;
+                          }
+                          const el = editorRef.current;
+                          if (!el) return;
+                          el.focus();
+                          el.setSelectionRange(it.offset, it.offset);
+                          const lhStr = window.getComputedStyle(el).lineHeight;
+                          const lh = Number.parseFloat(lhStr || "");
+                          el.scrollTop = Math.max(0, (it.line - 1) * (Number.isFinite(lh) ? lh : 22));
+                          setCursorLine(it.line);
+                        }}
+                        title={it.text}
+                      >
+                        {it.text}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="emptyHintSmall">未发现标题（# / ## / ### ...）。</div>
+                )}
+              </div>
+            )}
           </div>
         </aside>
 
@@ -1088,7 +1513,32 @@ function App() {
                 </div>
                 <div className="editorHeaderRight">{modeTabs}</div>
               </div>
-              <div className="wysiwygWrap">
+              <div
+                className="wysiwygWrap"
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+                  const imgs: File[] = [];
+                  for (const it of Array.from(items)) {
+                    if (it.kind === "file" && it.type.startsWith("image/")) {
+                      const f = it.getAsFile();
+                      if (f) imgs.push(f);
+                    }
+                  }
+                  if (!imgs.length) return;
+                  e.preventDefault();
+                  void insertImagesFromFiles(imgs);
+                }}
+                onDragOver={(e) => {
+                  if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  const imgs = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+                  if (!imgs.length) return;
+                  e.preventDefault();
+                  void insertImagesFromFiles(imgs);
+                }}
+              >
                 {wysiwyg ? <EditorContent editor={wysiwyg} /> : <div className="emptyHint">加载编辑器...</div>}
               </div>
             </div>
@@ -1110,6 +1560,33 @@ function App() {
                 onChange={(e) => {
                   setContent(e.currentTarget.value);
                   setDirty(true);
+                  updateCursorLineFromTextarea();
+                }}
+                onSelect={updateCursorLineFromTextarea}
+                onKeyUp={updateCursorLineFromTextarea}
+                onClick={updateCursorLineFromTextarea}
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+                  const imgs: File[] = [];
+                  for (const it of Array.from(items)) {
+                    if (it.kind === "file" && it.type.startsWith("image/")) {
+                      const f = it.getAsFile();
+                      if (f) imgs.push(f);
+                    }
+                  }
+                  if (!imgs.length) return;
+                  e.preventDefault();
+                  void insertImagesFromFiles(imgs);
+                }}
+                onDragOver={(e) => {
+                  if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  const imgs = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+                  if (!imgs.length) return;
+                  e.preventDefault();
+                  void insertImagesFromFiles(imgs);
                 }}
                 placeholder="在这里输入 Markdown..."
                 spellCheck={false}
@@ -1134,6 +1611,33 @@ function App() {
                   onChange={(e) => {
                     setContent(e.currentTarget.value);
                     setDirty(true);
+                    updateCursorLineFromTextarea();
+                  }}
+                  onSelect={updateCursorLineFromTextarea}
+                  onKeyUp={updateCursorLineFromTextarea}
+                  onClick={updateCursorLineFromTextarea}
+                  onPaste={(e) => {
+                    const items = e.clipboardData?.items;
+                    if (!items) return;
+                    const imgs: File[] = [];
+                    for (const it of Array.from(items)) {
+                      if (it.kind === "file" && it.type.startsWith("image/")) {
+                        const f = it.getAsFile();
+                        if (f) imgs.push(f);
+                      }
+                    }
+                    if (!imgs.length) return;
+                    e.preventDefault();
+                    void insertImagesFromFiles(imgs);
+                  }}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+                  }}
+                  onDrop={(e) => {
+                    const imgs = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+                    if (!imgs.length) return;
+                    e.preventDefault();
+                    void insertImagesFromFiles(imgs);
                   }}
                   placeholder="在这里输入 Markdown..."
                   spellCheck={false}

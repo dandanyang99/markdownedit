@@ -328,6 +328,68 @@ button {
   gap: 12px;
 }
 
+.sidebarTabs {
+  height: 40px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.sidebarTab {
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.sidebarTab:hover {
+  background: var(--color-hover);
+}
+
+.sidebarTab.active {
+  background: var(--color-hover);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.outline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.outlineList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.outlineItem {
+  text-align: left;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outlineItem:hover {
+  background: var(--color-hover);
+}
+
+.outlineItem.active {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
 .emptyHint {
   padding: 8px;
   border: 1px dashed var(--color-border);
@@ -541,6 +603,11 @@ button {
   color: var(--color-text);
 }
 
+.previewContent img {
+  max-width: 100%;
+  height: auto;
+}
+
 .previewContent table {
   border-collapse: collapse;
   width: 100%;
@@ -593,6 +660,11 @@ button {
   outline: none;
   min-height: 100%;
   line-height: 1.6;
+}
+
+.tiptapEditor img {
+  max-width: 100%;
+  height: auto;
 }
 
 .tiptapEditor p {
