@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,13 +12,6 @@ struct TreeNode {
     kind: String, // "file" | "folder"
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<TreeNode>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteBinaryFileBase64Args {
-    path: String,
-    content_base64: String,
 }
 
 fn scan_md_tree(dir: &Path) -> Result<Vec<TreeNode>, String> {
@@ -116,17 +109,18 @@ fn write_text_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn write_binary_file_base64(args: WriteBinaryFileBase64Args) -> Result<(), String> {
+#[allow(non_snake_case)]
+fn write_binary_file_base64(path: String, contentBase64: String) -> Result<(), String> {
     let bytes = general_purpose::STANDARD
-        .decode(args.content_base64.as_bytes())
+        .decode(contentBase64.as_bytes())
         .map_err(|e| format!("base64 decode failed: {e}"))?;
 
-    let p = PathBuf::from(&args.path);
+    let p = PathBuf::from(&path);
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {e}"))?;
     }
 
-    fs::write(&args.path, bytes).map_err(|e| format!("write failed: {e}"))
+    fs::write(&path, bytes).map_err(|e| format!("write failed: {e}"))
 }
 
 #[tauri::command]

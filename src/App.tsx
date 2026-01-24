@@ -42,6 +42,8 @@ type RecentFile = {
 type EditorMode = "wysiwyg" | "markdown" | "split";
 type ThemeMode = "light" | "dark";
 type SidebarTab = "files" | "outline";
+type ExportFormat = "html" | "pdf" | "docx";
+type LogLevel = "log" | "warn" | "error";
 
 const RECENTS_KEY = "markdownedit.recents.v1";
 const THEME_KEY = "markdownedit.theme.v1";
@@ -100,6 +102,67 @@ function safeConvertFileSrc(filePath: string) {
   } catch {
     return filePath;
   }
+}
+
+function mimeFromExt(ext: string) {
+  const e = ext.toLowerCase();
+  if (e === "png") return "image/png";
+  if (e === "jpg" || e === "jpeg") return "image/jpeg";
+  if (e === "gif") return "image/gif";
+  if (e === "webp") return "image/webp";
+  if (e === "bmp") return "image/bmp";
+  if (e === "svg") return "image/svg+xml";
+  return "application/octet-stream";
+}
+
+const PDF_CJK_FONT_FAMILY = "NotoSansCJKsc";
+const PDF_CJK_FONT_FILE = "NotoSansCJKsc-Regular.otf";
+
+async function ensurePdfCjkFont(pdfMake: any) {
+  if (pdfMake?.__mdeditCjkLoaded) return;
+
+  // Load bundled CJK font so PDF export doesn't garble Chinese.
+  const resp = await fetch(`/fonts/${PDF_CJK_FONT_FILE}`);
+  if (!resp.ok) throw new Error(`load pdf font failed: HTTP ${resp.status}`);
+  const buf = await resp.arrayBuffer();
+  const base64 = arrayBufferToBase64(buf);
+
+  pdfMake.vfs = { ...(pdfMake.vfs ?? {}), [PDF_CJK_FONT_FILE]: base64 };
+  pdfMake.fonts = {
+    ...(pdfMake.fonts ?? {}),
+    [PDF_CJK_FONT_FAMILY]: {
+      normal: PDF_CJK_FONT_FILE,
+      bold: PDF_CJK_FONT_FILE,
+      italics: PDF_CJK_FONT_FILE,
+      bolditalics: PDF_CJK_FONT_FILE,
+    },
+  };
+
+  pdfMake.__mdeditCjkLoaded = true;
+}
+
+function formatError(e: unknown) {
+  if (e instanceof Error) return `${e.name}: ${e.message}\n${e.stack ?? ""}`.trim();
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e, null, 2);
+  } catch {
+    return String(e);
+  }
+}
+
+function formatLogArgs(args: unknown[]) {
+  return args
+    .map((a) => {
+      if (typeof a === "string") return a;
+      if (a instanceof Error) return `${a.name}: ${a.message}\n${a.stack ?? ""}`.trim();
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
+      }
+    })
+    .join(" ");
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
@@ -187,6 +250,15 @@ function App() {
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [headingMenuOpen, setHeadingMenuOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const [appLogs, setAppLogs] = useState<Array<{ ts: number; level: LogLevel; text: string }>>([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("html");
+  const [exportEmbedImages, setExportEmbedImages] = useState(true);
+  const [exportPdfPageSize, setExportPdfPageSize] = useState<"A4" | "LETTER">("A4");
+  const [exportPdfOrientation, setExportPdfOrientation] = useState<"portrait" | "landscape">("portrait");
+  const [exporting, setExporting] = useState<{ pct: number; text: string } | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("files");
   const [cursorLine, setCursorLine] = useState(1);
   const [outlineTick, setOutlineTick] = useState(0);
@@ -195,6 +267,38 @@ function App() {
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const lastAppliedMdToWysiwygRef = useRef<string | null>(null);
   const wysiwygSyncTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const push = (level: LogLevel, args: unknown[]) => {
+      const entry = { ts: Date.now(), level, text: formatLogArgs(args) };
+      setAppLogs((prev) => [...prev.slice(-199), entry]);
+    };
+
+    const orig = {
+      log: console.log,
+      warn: console.warn,
+      error: console.error,
+    };
+
+    console.log = (...args: unknown[]) => {
+      orig.log(...args);
+      push("log", args);
+    };
+    console.warn = (...args: unknown[]) => {
+      orig.warn(...args);
+      push("warn", args);
+    };
+    console.error = (...args: unknown[]) => {
+      orig.error(...args);
+      push("error", args);
+    };
+
+    return () => {
+      console.log = orig.log;
+      console.warn = orig.warn;
+      console.error = orig.error;
+    };
+  }, []);
 
   const updateCursorLineFromTextarea = useCallback(() => {
     const el = editorRef.current;
@@ -261,6 +365,19 @@ function App() {
       }
       return fallback(tokens, idx, options, env, self);
     };
+    return inst;
+  }, []);
+
+  const mdForExport = useMemo(() => {
+    // Export renderer should keep image src as authored (relative), so exported HTML works on disk.
+    const inst = new MarkdownIt({
+      html: false,
+      linkify: true,
+      breaks: true,
+    });
+    inst.use(mdFootnote);
+    inst.use(mdMark);
+    inst.use(mdTaskLists, { enabled: true, label: true, labelAfter: false });
     return inst;
   }, []);
 
@@ -396,6 +513,466 @@ function App() {
     if (!currentFilePath) return null;
     return getDirName(currentFilePath);
   }, [currentFilePath]);
+
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !exporting) setExportOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [exportOpen, exporting]);
+
+  const buildExportHtml = useCallback(
+    async (markdown: string, opts: { embedLocalImages: boolean }) => {
+      const css = `
+        :root { color-scheme: light; }
+        body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Microsoft YaHei", sans-serif; line-height: 1.6; margin: 24px; color: #111; }
+        h1,h2,h3,h4,h5,h6 { margin: 1.2em 0 0.6em; }
+        p { margin: 0 0 0.8em; }
+        code { font-family: Consolas, "Courier New", monospace; background: #f3f3f3; padding: 0 4px; border-radius: 3px; }
+        pre { background: #f6f6f6; padding: 12px; border-radius: 6px; overflow: auto; }
+        pre code { background: transparent; padding: 0; }
+        blockquote { border-left: 4px solid #ddd; margin: 0.8em 0; padding: 0.2em 0 0.2em 0.8em; color: #555; }
+        table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+        th, td { border: 1px solid #ddd; padding: 6px; vertical-align: top; }
+        th { background: #f5f5f5; }
+        img { max-width: 100%; height: auto; }
+        .task-list-item { list-style: none; }
+        .task-list-item input[type="checkbox"] { margin-right: 6px; }
+        .footnotes { margin-top: 24px; padding-top: 12px; border-top: 1px solid #ddd; color: #666; }
+        mark { background: #fff2a8; padding: 0 2px; border-radius: 2px; }
+      `;
+
+      const title = currentFileName || "Markdown Export";
+      const bodyHtml = mdForExport.render(markdown);
+      const full = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title.replace(/</g, "&lt;")}</title>
+  <style>${css}</style>
+</head>
+<body>
+  <article class="md-body">
+  ${bodyHtml}
+  </article>
+</body>
+</html>`;
+
+      if (!opts.embedLocalImages) return { fullHtml: full, bodyHtml };
+      if (!currentFileDir) return { fullHtml: full, bodyHtml };
+
+      // Embed local (relative) images as data URLs for PDF/DOCX portability.
+      const doc = new DOMParser().parseFromString(full, "text/html");
+      const imgs = Array.from(doc.querySelectorAll("img"));
+      for (const img of imgs) {
+        const src = (img.getAttribute("src") || "").trim();
+        const abs = resolveLocalImageAbsPath(currentFileDir, src);
+        if (!abs) continue;
+        try {
+          const url = safeConvertFileSrc(abs);
+          const resp = await fetch(url);
+          if (!resp.ok) continue;
+          const buf = await resp.arrayBuffer();
+          const ext = getExtFromNameOrType(abs, "");
+          const mime = mimeFromExt(ext);
+          img.setAttribute("src", `data:${mime};base64,${arrayBufferToBase64(buf)}`);
+        } catch {
+          // ignore single image failures
+        }
+      }
+
+      const embeddedFull = "<!doctype html>\n" + doc.documentElement.outerHTML;
+      const embeddedBody = doc.body?.innerHTML ?? bodyHtml;
+      return { fullHtml: embeddedFull, bodyHtml: embeddedBody };
+    },
+    [currentFileDir, currentFileName, mdForExport],
+  );
+
+  const doExport = useCallback(async () => {
+    try {
+      setExportError(null);
+      const markdownToExport =
+        mode === "wysiwyg" && wysiwyg ? turndown.turndown(wysiwyg.getHTML()) : content;
+
+      if (!markdownToExport.trim()) {
+        alert("没有可导出的内容。");
+        return;
+      }
+
+      const baseName = (currentFileName || "未命名").replace(/\.md$/i, "") || "导出";
+      const dir = currentFileDir;
+      const ext = exportFormat === "html" ? "html" : exportFormat === "pdf" ? "pdf" : "docx";
+      const defaultPath = dir ? joinOsPath(dir, `${baseName}.${ext}`) : `${baseName}.${ext}`;
+
+      const selected = await save({
+        defaultPath,
+        filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+      });
+      if (!selected) return;
+
+      setExporting({ pct: 5, text: "准备导出..." });
+
+      if (exportFormat === "html") {
+        setExporting({ pct: 20, text: "渲染 HTML..." });
+        const { fullHtml } = await buildExportHtml(markdownToExport, { embedLocalImages: exportEmbedImages });
+        setExporting({ pct: 70, text: "写入文件..." });
+        await invoke("write_text_file", { path: selected, content: fullHtml });
+        setExporting({ pct: 100, text: "完成" });
+        setTimeout(() => setExporting(null), 400);
+        setExportOpen(false);
+        return;
+      }
+
+      if (exportFormat === "docx") {
+        setExporting({ pct: 20, text: "解析 Markdown..." });
+        const docxMod: any = await import("docx");
+        const {
+          Document,
+          Packer,
+          Paragraph,
+          TextRun,
+          HeadingLevel,
+          ExternalHyperlink,
+          ImageRun,
+          Table,
+          TableRow,
+          TableCell,
+          WidthType,
+        } = docxMod;
+
+        const tokens = mdForExport.parse(markdownToExport, {});
+
+        const blocks: any[] = [];
+        const listStack: Array<{ kind: "ul" | "ol"; index: number }> = [];
+        let quoteDepth = 0;
+
+        const inlineToChildren = async (inlineToken: any) => {
+          const children = inlineToken?.children ?? [];
+          const out: any[] = [];
+          const state = { bold: false, italics: false, strike: false, link: null as string | null };
+
+          const pushText = (text: string) => {
+            if (!text) return;
+            const run = new TextRun({
+              text,
+              bold: state.bold,
+              italics: state.italics,
+              strike: state.strike,
+            });
+            if (state.link) {
+              out.push(new ExternalHyperlink({ link: state.link, children: [run] }));
+            } else {
+              out.push(run);
+            }
+          };
+
+          for (const t of children) {
+            switch (t.type) {
+              case "text":
+                pushText(t.content);
+                break;
+              case "softbreak":
+                pushText("\n");
+                break;
+              case "code_inline":
+                out.push(
+                  new TextRun({
+                    text: t.content,
+                    font: "Consolas",
+                  }),
+                );
+                break;
+              case "strong_open":
+                state.bold = true;
+                break;
+              case "strong_close":
+                state.bold = false;
+                break;
+              case "em_open":
+                state.italics = true;
+                break;
+              case "em_close":
+                state.italics = false;
+                break;
+              case "s_open":
+              case "del_open":
+                state.strike = true;
+                break;
+              case "s_close":
+              case "del_close":
+                state.strike = false;
+                break;
+              case "link_open":
+                state.link = t.attrGet?.("href") ?? null;
+                break;
+              case "link_close":
+                state.link = null;
+                break;
+              case "image": {
+                const alt = t.content || "image";
+                const src = t.attrGet?.("src") ?? "";
+                if (!exportEmbedImages || !currentFileDir) {
+                  pushText(`![${alt}](${src})`);
+                  break;
+                }
+                const abs = resolveLocalImageAbsPath(currentFileDir, src);
+                if (!abs) {
+                  pushText(`![${alt}](${src})`);
+                  break;
+                }
+                try {
+                  const url = safeConvertFileSrc(abs);
+                  const resp = await fetch(url);
+                  if (!resp.ok) {
+                    pushText(`![${alt}](${src})`);
+                    break;
+                  }
+                  const blob = await resp.blob();
+                  const buf = await blob.arrayBuffer();
+
+                  let w = 520;
+                  let h = 320;
+                  try {
+                    const bmp = await createImageBitmap(blob);
+                    const maxW = 520;
+                    const scale = bmp.width > maxW ? maxW / bmp.width : 1;
+                    w = Math.max(60, Math.round(bmp.width * scale));
+                    h = Math.max(40, Math.round(bmp.height * scale));
+                  } catch {
+                    // ignore
+                  }
+
+                  out.push(
+                    new ImageRun({
+                      data: buf,
+                      transformation: { width: w, height: h },
+                    }),
+                  );
+                } catch {
+                  pushText(`![${alt}](${src})`);
+                }
+                break;
+              }
+              default:
+                break;
+            }
+          }
+          return out.length ? out : [new TextRun("")];
+        };
+
+        const paragraphFromInline = async (inlineToken: any, opts: any) => {
+          const children = await inlineToChildren(inlineToken);
+          return new Paragraph({ children, ...opts });
+        };
+
+        for (let i = 0; i < tokens.length; i++) {
+          const t: any = tokens[i];
+
+          if (t.type === "heading_open") {
+            const level = Number.parseInt((t.tag || "h1").slice(1), 10) || 1;
+            const inline = tokens[i + 1];
+            const heading =
+              level === 1
+                ? HeadingLevel.HEADING_1
+                : level === 2
+                  ? HeadingLevel.HEADING_2
+                  : level === 3
+                    ? HeadingLevel.HEADING_3
+                    : HeadingLevel.HEADING_4;
+            blocks.push(await paragraphFromInline(inline, { heading }));
+            // Skip inline + close.
+            i += 2;
+            continue;
+          }
+
+          if (t.type === "paragraph_open") {
+            const inline = tokens[i + 1];
+            const listTop = listStack[listStack.length - 1] ?? null;
+            const quoteIndent = quoteDepth ? { left: 720 * quoteDepth } : undefined;
+
+            if (listTop?.kind === "ul") {
+              blocks.push(
+                await paragraphFromInline(inline, {
+                  bullet: { level: Math.max(0, listStack.length - 1) },
+                  indent: quoteIndent ? { ...quoteIndent } : undefined,
+                }),
+              );
+            } else if (listTop?.kind === "ol") {
+              const children = await inlineToChildren(inline);
+              const prefix = new TextRun({ text: `${listTop.index}. ` });
+              blocks.push(
+                new Paragraph({
+                  children: [prefix, ...children],
+                  indent: quoteIndent ? { ...quoteIndent } : undefined,
+                }),
+              );
+            } else {
+              blocks.push(
+                await paragraphFromInline(inline, {
+                  indent: quoteIndent ? { ...quoteIndent } : undefined,
+                }),
+              );
+            }
+            i += 2;
+            continue;
+          }
+
+          if (t.type === "bullet_list_open") {
+            listStack.push({ kind: "ul", index: 0 });
+            continue;
+          }
+          if (t.type === "bullet_list_close") {
+            listStack.pop();
+            continue;
+          }
+          if (t.type === "ordered_list_open") {
+            listStack.push({ kind: "ol", index: 0 });
+            continue;
+          }
+          if (t.type === "ordered_list_close") {
+            listStack.pop();
+            continue;
+          }
+          if (t.type === "list_item_open") {
+            const top = listStack[listStack.length - 1];
+            if (top && top.kind === "ol") top.index += 1;
+            continue;
+          }
+
+          if (t.type === "blockquote_open") {
+            quoteDepth += 1;
+            continue;
+          }
+          if (t.type === "blockquote_close") {
+            quoteDepth = Math.max(0, quoteDepth - 1);
+            continue;
+          }
+
+          if (t.type === "fence" || t.type === "code_block") {
+            blocks.push(
+              new Paragraph({
+                children: [new TextRun({ text: t.content, font: "Consolas" })],
+              }),
+            );
+            continue;
+          }
+
+          if (t.type === "table_open") {
+            const rows: any[] = [];
+            // Collect until table_close.
+            for (i = i + 1; i < tokens.length; i++) {
+              const tt: any = tokens[i];
+              if (tt.type === "table_close") break;
+              if (tt.type !== "tr_open") continue;
+              const cells: any[] = [];
+              for (i = i + 1; i < tokens.length; i++) {
+                const cc: any = tokens[i];
+                if (cc.type === "tr_close") break;
+                if (cc.type !== "th_open" && cc.type !== "td_open") continue;
+                const inline = tokens[i + 1];
+                const para = await paragraphFromInline(inline, {});
+                cells.push(new TableCell({ children: [para] }));
+                // skip inline + close
+                i += 2;
+              }
+              rows.push(new TableRow({ children: cells }));
+            }
+            blocks.push(
+              new Table({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                rows,
+              }),
+            );
+            continue;
+          }
+        }
+
+        setExporting({ pct: 55, text: "生成 DOCX..." });
+        const doc = new Document({
+          sections: [{ children: blocks.length ? blocks : [new Paragraph({ children: [new TextRun("")] })] }],
+        });
+        const blob = await Packer.toBlob(doc);
+        const buf = await blob.arrayBuffer();
+
+        setExporting({ pct: 80, text: "写入文件..." });
+        await invoke("write_binary_file_base64", { path: selected, contentBase64: arrayBufferToBase64(buf) });
+        setExporting({ pct: 100, text: "完成" });
+        setTimeout(() => setExporting(null), 400);
+        setExportOpen(false);
+        return;
+      }
+
+      // PDF
+      setExporting({ pct: 20, text: "渲染 HTML..." });
+      const { bodyHtml } = await buildExportHtml(markdownToExport, { embedLocalImages: exportEmbedImages });
+      setExporting({ pct: 40, text: "生成 PDF..." });
+
+      const pdfMakeMod: any = await import("pdfmake/build/pdfmake");
+      const pdfFontsMod: any = await import("pdfmake/build/vfs_fonts");
+      const htmlToPdfmakeMod: any = await import("html-to-pdfmake");
+
+      const pdfMake = pdfMakeMod.default ?? pdfMakeMod;
+      const vfs = pdfFontsMod.pdfMake?.vfs ?? pdfFontsMod.default?.pdfMake?.vfs;
+      if (vfs) pdfMake.vfs = vfs;
+      const htmlToPdfmake = htmlToPdfmakeMod.default ?? htmlToPdfmakeMod;
+
+      let pdfDefaultFont: string | undefined = undefined;
+      try {
+        setExporting({ pct: 45, text: "加载中文字体..." });
+        await ensurePdfCjkFont(pdfMake);
+        pdfDefaultFont = PDF_CJK_FONT_FAMILY;
+      } catch (e) {
+        // Still generate a PDF using default fonts, but it may garble CJK.
+        console.warn("PDF CJK font load failed:", e);
+      }
+      setExporting({ pct: 60, text: "排版 PDF..." });
+
+      const pdfContent = htmlToPdfmake(bodyHtml, { window });
+      const docDefinition: any = {
+        content: pdfContent,
+        pageSize: exportPdfPageSize,
+        pageOrientation: exportPdfOrientation,
+        pageMargins: [32, 32, 32, 32],
+        defaultStyle: { ...(pdfDefaultFont ? { font: pdfDefaultFont } : {}), fontSize: 10 },
+      };
+
+      const base64 = await new Promise<string>((resolve, reject) => {
+        try {
+          pdfMake.createPdf(docDefinition).getBase64((data: string) => resolve(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+
+      setExporting({ pct: 80, text: "写入文件..." });
+      await invoke("write_binary_file_base64", { path: selected, contentBase64: base64 });
+      setExporting({ pct: 100, text: "完成" });
+      setTimeout(() => setExporting(null), 400);
+      setExportOpen(false);
+    } catch (e) {
+      console.error(e);
+      setExporting(null);
+      setExportError(formatError(e));
+      // Keep export dialog open so user can see error details.
+      setExportOpen(true);
+    }
+  }, [
+    buildExportHtml,
+    content,
+    currentFileDir,
+    currentFileName,
+    mdForExport,
+    exportEmbedImages,
+    exportFormat,
+    exportPdfOrientation,
+    exportPdfPageSize,
+    mode,
+    turndown,
+    wysiwyg,
+  ]);
 
   const updateRecents = useCallback((path: string) => {
     const entry: RecentFile = { path, name: getFileName(path) };
@@ -1198,7 +1775,7 @@ function App() {
                     role="menuitem"
                     onClick={() => {
                       setFileMenuOpen(false);
-                      alert("导出功能在后续里程碑实现（HTML/PDF/DOCX）。");
+                      setExportOpen(true);
                     }}
                   >
                     导出...
@@ -1234,6 +1811,29 @@ function App() {
                     }}
                   >
                     偏好设置
+                  </button>
+                  <button
+                    type="button"
+                    className="menuItem"
+                    role="menuitem"
+                    onClick={() => {
+                      setSettingsMenuOpen(false);
+                      setLogOpen(true);
+                    }}
+                  >
+                    查看日志
+                  </button>
+                  <button
+                    type="button"
+                    className="menuItem"
+                    role="menuitem"
+                    onClick={() => {
+                      setSettingsMenuOpen(false);
+                      setAppLogs([]);
+                      alert("已清空日志。");
+                    }}
+                  >
+                    清空日志
                   </button>
                   <button
                     type="button"
@@ -1673,6 +2273,214 @@ function App() {
           </span>
         </div>
       </footer>
+
+      {exportOpen ? (
+        <div
+          className="modalOverlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="导出设置"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !exporting) setExportOpen(false);
+          }}
+        >
+          <div className="modal">
+            <div className="modalHeader">
+              <div className="modalTitle">导出</div>
+              <button
+                type="button"
+                className="iconBtn"
+                onClick={() => {
+                  if (!exporting) setExportOpen(false);
+                }}
+                title="关闭"
+              >
+                ×
+              </button>
+            </div>
+            <div className="modalBody">
+              {exportError ? (
+                <div className="errorBox">
+                  <div className="errorHeader">
+                    <div className="errorTitle">导出失败</div>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(exportError);
+                          alert("已复制错误信息。");
+                        } catch (e) {
+                          console.error(e);
+                          window.prompt("复制错误信息：", exportError);
+                        }
+                      }}
+                    >
+                      复制错误信息
+                    </button>
+                  </div>
+                  <pre className="errorPre">{exportError}</pre>
+                  <div className="errorHint">也可通过“设置 → 查看日志”查看运行日志。</div>
+                </div>
+              ) : null}
+
+              <div className="formRow">
+                <div className="formLabel">格式</div>
+                <select
+                  className="formControl"
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.currentTarget.value as ExportFormat)}
+                  disabled={!!exporting}
+                >
+                  <option value="html">HTML</option>
+                  <option value="pdf">PDF</option>
+                  <option value="docx">DOCX</option>
+                </select>
+              </div>
+
+              {exportFormat === "pdf" ? (
+                <>
+                  <div className="formRow">
+                    <div className="formLabel">纸张</div>
+                    <select
+                      className="formControl"
+                      value={exportPdfPageSize}
+                      onChange={(e) => setExportPdfPageSize(e.currentTarget.value as any)}
+                      disabled={!!exporting}
+                    >
+                      <option value="A4">A4</option>
+                      <option value="LETTER">Letter</option>
+                    </select>
+                  </div>
+                  <div className="formRow">
+                    <div className="formLabel">方向</div>
+                    <select
+                      className="formControl"
+                      value={exportPdfOrientation}
+                      onChange={(e) => setExportPdfOrientation(e.currentTarget.value as any)}
+                      disabled={!!exporting}
+                    >
+                      <option value="portrait">纵向</option>
+                      <option value="landscape">横向</option>
+                    </select>
+                  </div>
+                </>
+              ) : null}
+
+              <div className="formRow">
+                <div className="formLabel">嵌入图片</div>
+                <label className="checkLine">
+                  <input
+                    type="checkbox"
+                    checked={exportEmbedImages}
+                    onChange={(e) => setExportEmbedImages(e.currentTarget.checked)}
+                    disabled={!!exporting}
+                  />
+                  <span>将本地相对路径图片嵌入到导出文件中（更便携，体积更大）</span>
+                </label>
+              </div>
+
+              <div className="modalHint">
+                导出会弹出保存对话框选择输出路径；PDF/DOCX 为“先可用”实现，复杂样式可能与预览略有差异。
+              </div>
+            </div>
+            <div className="modalFooter">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setExportOpen(false)}
+                disabled={!!exporting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void doExport()}
+                disabled={!!exporting}
+              >
+                开始导出
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {exporting ? (
+        <div className="progressOverlay" role="status" aria-label="导出进度">
+          <div className="progressCard">
+            <div className="progressTitle">正在导出...</div>
+            <div className="progressBar" aria-hidden="true">
+              <div className="progressFill" style={{ width: `${exporting.pct}%` }} />
+            </div>
+            <div className="progressText">{exporting.text}</div>
+          </div>
+        </div>
+      ) : null}
+
+      {logOpen ? (
+        <div
+          className="modalOverlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="日志"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setLogOpen(false);
+          }}
+        >
+          <div className="modal">
+            <div className="modalHeader">
+              <div className="modalTitle">日志</div>
+              <button type="button" className="iconBtn" onClick={() => setLogOpen(false)} title="关闭">
+                ×
+              </button>
+            </div>
+            <div className="modalBody">
+              <div className="logActions">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    const text = appLogs
+                      .map((l) => `${new Date(l.ts).toISOString()} [${l.level}] ${l.text}`)
+                      .join("\n");
+                    try {
+                      await navigator.clipboard.writeText(text);
+                      alert("已复制日志。");
+                    } catch (e) {
+                      console.error(e);
+                      window.prompt("复制日志：", text);
+                    }
+                  }}
+                >
+                  复制日志
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setAppLogs([]);
+                  }}
+                >
+                  清空
+                </button>
+              </div>
+              <div className="logList" role="log" aria-label="运行日志">
+                {appLogs.length ? (
+                  appLogs.map((l, idx) => (
+                    <div key={`${l.ts}-${idx}`} className={`logLine ${l.level}`}>
+                      <span className="logMeta">{new Date(l.ts).toLocaleTimeString()} [{l.level}]</span>
+                      <span className="logText">{l.text}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="emptyHintSmall">暂无日志。</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

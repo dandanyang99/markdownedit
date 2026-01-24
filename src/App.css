@@ -336,6 +336,9 @@ button {
   border-radius: 4px;
   overflow: hidden;
   background: var(--color-surface);
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 
 .sidebarTab {
@@ -728,4 +731,240 @@ button {
   align-items: center;
   gap: 12px;
   min-width: 0;
+}
+
+.modalOverlay,
+.progressOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.modal {
+  width: min(560px, calc(100vw - 24px));
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+}
+
+.modalHeader {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.modalTitle {
+  font-weight: 700;
+}
+
+.modalBody {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modalFooter {
+  padding: 10px 12px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.formRow {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.formLabel {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.formControl {
+  height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.checkLine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.modalHint {
+  font-size: 12px;
+  color: var(--color-muted);
+  border: 1px dashed var(--color-border);
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.errorBox {
+  border: 1px solid #ffb3b3;
+  background: #fff5f5;
+  color: #6b0000;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.errorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.errorTitle {
+  font-weight: 700;
+}
+
+.errorPre {
+  margin: 0;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #ffd1d1;
+  background: rgba(255, 255, 255, 0.6);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #3a0000;
+}
+
+.errorHint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6b0000;
+  opacity: 0.8;
+}
+
+.btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--color-hover);
+}
+
+.btn.primary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: white;
+}
+
+.btn.primary:hover {
+  filter: brightness(0.96);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.progressCard {
+  width: min(420px, calc(100vw - 24px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+}
+
+.progressTitle {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.progressBar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-hover);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--color-primary);
+  width: 0;
+}
+
+.progressText {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.logActions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.logList {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--color-bg);
+  max-height: 340px;
+  overflow: auto;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.logLine {
+  display: flex;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.logLine.warn {
+  background: rgba(255, 201, 71, 0.15);
+}
+
+.logLine.error {
+  background: rgba(255, 85, 85, 0.15);
+}
+
+.logMeta {
+  flex: 0 0 auto;
+  color: var(--color-muted);
+}
+
+.logText {
+  flex: 1;
+  color: var(--color-text);
 }
