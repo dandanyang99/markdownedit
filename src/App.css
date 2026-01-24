@@ -328,6 +328,11 @@ button {
   gap: 12px;
 }
 
+.sidebarTabsArea {
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
 .sidebarTabs {
   height: 40px;
   display: grid;
@@ -336,9 +341,6 @@ button {
   border-radius: 4px;
   overflow: hidden;
   background: var(--color-surface);
-  position: sticky;
-  top: 0;
-  z-index: 5;
 }
 
 .sidebarTab {

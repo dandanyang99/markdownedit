@@ -122,7 +122,8 @@ async function ensurePdfCjkFont(pdfMake: any) {
   if (pdfMake?.__mdeditCjkLoaded) return;
 
   // Load bundled CJK font so PDF export doesn't garble Chinese.
-  const resp = await fetch(`/fonts/${PDF_CJK_FONT_FILE}`);
+  const url = new URL(`/fonts/${PDF_CJK_FONT_FILE}`, window.location.origin).toString();
+  const resp = await fetch(url);
   if (!resp.ok) throw new Error(`load pdf font failed: HTTP ${resp.status}`);
   const buf = await resp.arrayBuffer();
   const base64 = arrayBufferToBase64(buf);
@@ -2009,7 +2010,7 @@ function App() {
             </div>
           </div>
 
-          <div className="sidebarBody">
+          <div className="sidebarTabsArea">
             <div className="sidebarTabs" role="tablist" aria-label="侧边栏">
               <button
                 type="button"
@@ -2030,7 +2031,9 @@ function App() {
                 大纲
               </button>
             </div>
+          </div>
 
+          <div className="sidebarBody">
             {sidebarTab === "files" ? (
               <>
                 {workspaceTree ? (
