@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "scripts\\tauri.cmd"
+    "tauri": "npx tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
